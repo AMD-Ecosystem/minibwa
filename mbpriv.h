@@ -1,3 +1,4 @@
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef MBPRIV_H
 #define MBPRIV_H
 
@@ -64,11 +65,16 @@ mb_anchor_t *mb_lchain_dp(void *km, const l2b_t *l2b, int max_dist_x, int max_di
 
 // defined in map-algo.c
 void *mb_tbuf_km(mb_tbuf_t *b);
+// Return this thread's GPU alignment accumulator (see gpu/gpu_dispatch.h),
+// lazily creating it from opt on first use. Returns NULL when GPU alignment is
+// not requested (opt->flag lacks MB_F_GPU) or was not compiled in. The opaque
+// pointer type is void* here so this header stays free of the GPU headers.
+void *mb_tbuf_gpu(mb_tbuf_t *b, const mb_opt_t *opt);
 int32_t mb_cal_mblen(int32_t n, const mb_anchor_t *a, int32_t *blen_);
 mb_hit_t *mb_gen_hit(void *km, uint32_t hash, int qlen, const l2b_t *l2b, int n_u, uint64_t *u, mb_anchor_t *a);
 void mb_sync_high_cov(int32_t n, mb_hit_t *h);
 void mb_set_parent(void *km, float mask_level, int mask_len, int n, mb_hit_t *r, int sub_diff, int hard_mask_level);
-int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5);
+void mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5);
 void mb_hit_sort(void *km, int *n_regs, mb_hit_t *r);
 void mb_sync_hits(void *km, int n_regs, mb_hit_t *regs);
 void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_, mb_hit_t *r);
@@ -93,7 +99,7 @@ void mb_format(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, in
 char *mb_escape(char *s);
 
 // defined in align.c
-mb_hit_t *mb_align_skeleton(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, const uint8_t *seq, l2b_meth_t mt, int *n_regs_, mb_hit_t *regs, mb_anchor_t *a);
+mb_hit_t *mb_align_skeleton(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, const uint8_t *seq, l2b_meth_t mt, int *n_regs_, mb_hit_t *regs, mb_anchor_t *a, void *gpu);
 void mb_append_cigar(mb_hit_t *r, uint32_t n_cigar, const uint32_t *cigar);
 void mb_update_extra(void *km, mb_hit_t *r, const uint8_t *qseq, const uint8_t *tseq, const int8_t *mat, int8_t q, int8_t e, uint64_t opt_flag, int log_gap);
 

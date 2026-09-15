@@ -1,9 +1,10 @@
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef MINIBWA_H
 #define MINIBWA_H
 
 #include <stdint.h>
 
-#define MB_VERSION "0.7-r424-dirty"
+#define MB_VERSION "0.3-r391"
 
 #define MB_F_PAF              (0x1LL)       // output in the PAF format
 #define MB_F_NO_UNMAP         (0x2LL)       // output unmapped query sequences
@@ -20,9 +21,10 @@
 #define MB_F_2ND_SEQ          (0x1000LL)    // in SAM, write SEQ for secondary alignments
 #define MB_F_SUPP_SOFT        (0x2000LL)    // in SAM, use soft-clips for supplementary alignments
 #define MB_F_ADAP             (0x4000LL)    // adaptive mode
-#define MB_F_PRIMARY5         (0x8000LL)    // for Hi-C
-#define MB_F_NO_PAIRING       (0x10000LL)   // don't pair reads
+#define MB_F_PRIMARY5         (0x8000LL)
+#define MB_F_NO_PAIRING       (0x10000LL)
 #define MB_F_METH             (0x20000LL)   // methylation mode
+#define MB_F_GPU              (0x40000LL)   // offload dual-affine DP alignment to an AMD Instinct GPU (ROCm)
 
 #define MB_CIGAR_MATCH      0
 #define MB_CIGAR_INS        1
@@ -77,9 +79,9 @@ typedef struct {
 	int32_t sb_seq;   // number of sequences for batch smem
 	int32_t n_thread; // number of worker threads, excluding I/O threads
 	int32_t out_n;    // max number of secondary alignments to output
-	float out_s;
 	int32_t seed;
 	int32_t xa_max;
+	float xa_ratio;
 	int64_t mb_size;  // mini-batch size
 	int64_t max_mb_size;
 	int64_t max_sw_mat;
@@ -125,7 +127,6 @@ extern "C" {
 #endif
 
 mb_idx_t *mb_idx_load(const char *prefix, int32_t is_meth);
-mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload);
 void mb_idx_destroy(mb_idx_t *idx);
 const char *mb_idx_ctg_name(const mb_idx_t *idx, int32_t tid);
 int64_t mb_idx_ctg_len(const mb_idx_t *idx, int32_t tid);

@@ -35,8 +35,8 @@ static void mb_opt_reset(mb_opt_t *opt)
 	opt->sb_seq = 24;
 	opt->n_thread = 1;
 	opt->seed = 11;
-	opt->out_s = 0.8f;
 	opt->xa_max = 5;
+	opt->xa_ratio = 0.8f;
 	opt->max_sw_mat = 100000000;
 	opt->cap_kalloc = 1UL<<28;
 	opt->max_mb_size = 1000000000;
@@ -58,6 +58,7 @@ int mb_opt_preset(mb_opt_t *opt, const char *preset)
 		opt->flag |= MB_F_PE;
 		if (strcmp(preset, "adap") == 0) opt->flag |= MB_F_ADAP;
 		opt->min_dp_max = 30;
+		opt->flag |= MB_F_ADAP;
 		opt->bw = 100;
 		opt->max_gap = 100;
 		opt->zdrop = 80;

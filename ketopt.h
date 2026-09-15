@@ -12,7 +12,6 @@ typedef struct {
 	int opt;   /* equivalent to optopt */
 	char *arg; /* equivalent to optarg */
 	int longidx; /* index of a long option; or -1 if short */
-	int erri; /* offset of the wrong option */
 	/* private variables not intended for external uses */
 	int i, pos, n_args;
 } ketopt_t;
@@ -23,7 +22,7 @@ typedef struct {
 	int val;
 } ko_longopt_t;
 
-static ketopt_t KETOPT_INIT = { 1, 0, 0, -1, -1, 1, 0, 0 };
+static ketopt_t KETOPT_INIT = { 1, 0, 0, -1, 1, 0, 0 };
 
 static void ketopt_permute(char *argv[], int j, int n) /* move argv[j] over n elements to the left */
 {
@@ -61,7 +60,7 @@ static int ketopt(ketopt_t *s, int argc, char *argv[], int permute, const char *
 		while (s->i < argc && (argv[s->i][0] != '-' || argv[s->i][1] == '\0'))
 			++s->i, ++s->n_args;
 	}
-	s->arg = 0, s->longidx = -1, s->erri = -1, i0 = s->i;
+	s->arg = 0, s->longidx = -1, i0 = s->i;
 	if (s->i >= argc || argv[s->i][0] != '-' || argv[s->i][1] == '\0') {
 		s->ind = s->i - s->n_args;
 		return -1;
@@ -83,7 +82,7 @@ static int ketopt(ketopt_t *s, int argc, char *argv[], int permute, const char *
 					else ++n_partial, o_partial = &longopts[k];
 				}
 			if (n_exact > 1 || (n_exact == 0 && n_partial > 1)) {
-				s->erri = s->i++;
+				s->i++;
 				return '?';
 			}
 			o = n_exact == 1? o_exact : n_partial == 1? o_partial : 0;
@@ -94,7 +93,7 @@ static int ketopt(ketopt_t *s, int argc, char *argv[], int permute, const char *
 					if (s->i < argc - 1) s->arg = argv[++s->i];
 					else opt = ':'; /* missing option argument */
 				}
-			} else s->erri = s->i;
+			}
 		}
 	} else { /* a short option */
 		char *p;
@@ -102,7 +101,7 @@ static int ketopt(ketopt_t *s, int argc, char *argv[], int permute, const char *
 		opt = s->opt = argv[s->i][s->pos++];
 		p = strchr((char*)ostr, opt);
 		if (p == 0) {
-			s->erri = s->i, opt = '?'; /* unknown option */
+			opt = '?'; /* unknown option */
 		} else if (p[1] == ':') {
 			if (argv[s->i][s->pos] == 0) {
 				if (s->i < argc - 1) s->arg = argv[++s->i];
@@ -116,7 +115,6 @@ static int ketopt(ketopt_t *s, int argc, char *argv[], int permute, const char *
 		if (s->n_args > 0) /* permute */
 			for (j = i0; j < s->i; ++j)
 				ketopt_permute(argv, j, s->n_args);
-		if (s->erri >= 0) s->erri -= s->n_args; /* permutation moved the option left by n_args */
 	}
 	s->ind = s->i - s->n_args;
 	return opt;

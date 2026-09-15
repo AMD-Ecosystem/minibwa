@@ -1,4 +1,4 @@
-.TH minibwa 1 "6 August 2026" "minibwa-0.7 (r421)" "Bioinformatics tools"
+.TH minibwa 1 "28 June 2026" "minibwa-0.3 (r391)" "Bioinformatics tools"
 .SH NAME
 .PP
 minibwa - short/long-read alignment against a reference genome
@@ -172,7 +172,7 @@ occurrences if there are too many.
 .TP
 .BI -g \ NUM
 Stop chain enlongation if there are no minimizers within
-.IR NUM -bp
+.BR NUM -bp
 [5000]. Also used for extending from the first and last anchors during base
 alignment.
 .TP
@@ -194,9 +194,7 @@ Retain at most
 secondary alignments [101]
 .TP
 .B --chain-only
-Perform chaining only without base alignment. Force
-.B -fP
-to disable pairing and output PAF.
+Perform chaining only without base alignment
 .TP
 .BR --long = yes | no
 Whether to use the long-read heuristic for all reads
@@ -290,14 +288,6 @@ or
 presets. Disabled with the
 .B lr
 preset.
-.TP
-.B -I \fIINT1\fR[,\fIINT2\fR[,\fIINT3\fR[,\fIINT4\fR]]]
-Mean, standard deviation, max and min of the expected insert size distribution [inferred].
-If missing,
-.IR INT2 =round( INT1 /10),
-.IR INT3 = INT1 + INT2 *4,
-and
-.IR INT4 =min( INT1 - INT2 *4,1).
 
 .SS Input/Output Options
 .TP 10
@@ -309,20 +299,13 @@ Don't output unmapped reads
 .TP
 .BR --outn = \fINUM
 Output up to
-.RI min( INT ,{\fB-N\fR})
+.I INT
 secondary alignments [0]. Primary and supplementary alignments are always outputted.
-.TP
-.BR --outs = \fIFLOAT
-Output a secondary hit if its score is above
-.I FLOAT
-times the primary alignment score [0.8]. This option also controls the XA tag.
 .TP
 .BR --xa = \fINUM
 If there are
 .RI >= NUM
-secondary hits of score above
-.RB { --outs }
-times the primary alignment score, output all of them to the XA tag [5]
+secondary hits of score above 80% of the best hit, output all of them to the XA tag [5]
 .TP
 .B -y
 Copy FASTA/Q comments to output
@@ -352,18 +335,6 @@ batch is at least
 in size. If there are less than 40000 sequences in the batch, continue to read
 until the size reaches
 .IR NUM2 .
-.TP
-.BR --mmap [= lite ]
-Load the index by mapping the index files to RAM. With this option, the
-first index loading time will be slower but the following index loading will be
-faster if the index remains in RAM. The optional
-.B lite
-argument further reduces hot loading time but may greatly increase cold loading
-time sometimes. With
-.BR --mmap ,
-multiple minibwa processes on the same machine can also use the same index
-without duplicating it in memory. Mapping may be slower depending on the
-system.
 .TP
 .B --version
 Print version number

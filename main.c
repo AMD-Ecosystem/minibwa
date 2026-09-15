@@ -23,7 +23,7 @@ int main_bench(int argc, char *argv[]);
 
 static int usage(FILE *fp, int is_long)
 {
-	fprintf(fp, "Usage: minibwa <command> <arguments>\n");
+	fprintf(fp, "Usage: minibwt <command> <arguments>\n");
 	fprintf(fp, "Commands:\n");
 	if (is_long) {
 		fprintf(fp, "  General:\n");
@@ -85,7 +85,7 @@ int main(int argc, char *argv[])
 			fprintf(stderr, " %s", argv[i]);
 		fprintf(stderr, "\n[M::%s] Real time: %.3f sec; CPU: %.3f sec; Peak RSS: %.3f GB\n", __func__, kom_realtime(), kom_cputime(), kom_peakrss() / 1024.0 / 1024.0 / 1024.0);
 	}
-	return ret;
+	return 0;
 }
 
 static int usage_getref(FILE *fp)

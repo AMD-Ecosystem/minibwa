@@ -115,7 +115,7 @@ int mb_fmt_sam_hdr(kstring_t *str, const l2b_t *idx, const char *rg, const char 
 	if (ver) kom_sprintf_lite(str, "\tVN:%s", ver);
 	if (argc > 1) {
 		kom_sprintf_lite(str, "\tCL:minibwa");
-		for (i = 0; i < argc; ++i)
+		for (i = 1; i < argc; ++i)
 			kom_sprintf_lite(str, " %s", argv[i]);
 	}
 	kom_sprintf_lite(str, "\n");
@@ -254,13 +254,8 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 			kom_sprintf_lite(s, "%d\t", r_next->ts + 1);
 		} else if (r_next) { // && this_tid < 0
 			kom_sprintf_lite(s, "\t%s\t%d\t", l2b->ctg[r_next->tid].name, r_next->ts + 1);
-		} else if (this_tid >= 0) { // && r_next == NULL. In this case, mate is unmapped and placed at this segment's primary alignment
-			const mb_hit_t *r_pri;
-			r_pri = get_sam_pri(n_h, h);
-			if (r->tid == r_pri->tid)
-				kom_sprintf_lite(s, "\t=\t%d\t", r_pri->ts + 1);
-			else
-				kom_sprintf_lite(s, "\t%s\t%d\t", l2b->ctg[r_pri->tid].name, r_pri->ts + 1);
+		} else if (this_tid >= 0) { // && r_next == NULL
+			kom_sprintf_lite(s, "\t=\t%d\t", this_pos + 1); // next segment will take r's coordinate
 		} else kom_sprintf_lite(s, "\t*\t0\t"); // neither has coordinates
 		if (tlen > 0) ++tlen;
 		else if (tlen < 0) --tlen;
@@ -328,14 +323,14 @@ void mb_fmt_sam(void *km, kstring_t *s, const l2b_t *l2b, const mb_bseq1_t *t, i
 			if (opt->xa_max > 0) {
 				int i, n_xa = 0;
 				for (i = 0; i < n_h; ++i)
-					if (i != r - h && h[i].parent == r - h && h[i].p->dp_max >= (double)opt->out_s * r->p->dp_max)
+					if (i != r - h && h[i].parent == r - h && h[i].p->dp_max >= (double)opt->xa_ratio * r->p->dp_max)
 						++n_xa;
 				if (n_xa > 0) kom_sprintf_lite(s, "\tn2:i:%d", n_xa);
 				if (n_xa > 0 && n_xa <= opt->xa_max) {
 					kom_sprintf_lite(s, "\tXA:Z:");
 					for (i = 0; i < n_h; ++i) {
 						const mb_hit_t *q = &h[i];
-						if (i != r - h && q->parent == r - h && q->p->dp_max >= (double)opt->out_s * r->p->dp_max) {
+						if (i != r - h && q->parent == r - h && q->p->dp_max >= (double)opt->xa_ratio * r->p->dp_max) {
 							kom_sprintf_lite(s, "%s,%c%d,", l2b->ctg[q->tid].name, "+-"[q->rev], q->ts+1);
 							write_sam_cigar(s, 0, 0, t->l_seq, q, opt->flag);
 							kom_sprintf_lite(s, ",%d;", q->blen - q->mlen + q->p->n_ambi);
