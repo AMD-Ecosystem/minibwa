@@ -1,3 +1,4 @@
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
@@ -7,6 +8,9 @@
 #include "kommon.h"
 #include "kalloc.h"
 #include "ksw2.h"
+#ifdef HAVE_GPU_ALIGNMENT
+#include "gpu/include/gpu_dispatch.h"
+#endif
 
 static inline void update_max_zdrop(int32_t score, int i, int j, int32_t *max, int *max_i, int *max_j, int e, int *max_zdrop, int pos[2][2])
 {
@@ -327,7 +331,7 @@ static inline int32_t max_bw_from_mm(const mb_opt_t *opt, int32_t mm)
 }
 
 static void mb_align_pair(void *km, const mb_opt_t *opt, int qlen, const uint8_t *qseq, int tlen, const uint8_t *tseq,
-						  const int8_t *mat, int w, int end_bonus, int zdrop, int ksw_flag, ksw_extz_t *ez)
+						  const int8_t *mat, int w, int end_bonus, int zdrop, int ksw_flag, ksw_extz_t *ez, void *gpu)
 {
 	const int max_bw_adj_len = 100; // don't adjust bandwidth if sequences are too long
 	int32_t j, n_mm = -1;
@@ -373,7 +377,44 @@ static void mb_align_pair(void *km, const mb_opt_t *opt, int qlen, const uint8_t
 	} else if (opt->q == opt->q2 && opt->e == opt->e2) { // affine gap
 		ksw_extz2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, w, zdrop * opt->a, end_bonus, ksw_flag, ez);
 	} else { // dual affine gap
+#ifdef HAVE_GPU_ALIGNMENT
+		// Offload the dual-affine banded DP to the GPU when a per-thread
+		// accumulator is available. The seam is exactly here: qseq/tseq are
+		// already the seed-anchored, correctly-oriented subsequences the CPU
+		// ksw_extd2_sse would receive, and the transplanted ksw_extd2_gpu batch
+		// takes the same ksw2 primitives and writes results back into this ez.
+		// The generic scoring matrix (methylation / transition) is not modelled
+		// by the batch's ksw_gen_simple_mat, so those paths stay on CPU.
+		if (gpu != NULL && !(ksw_flag & KSW_EZ_GENERIC_SC)) {
+			uint32_t *km_cigar = ez->cigar; // preserve the reusable km-owned buffer
+			int km_m_cigar = ez->m_cigar;
+			ksw_reset_extz(ez);
+			ez->cigar = 0, ez->m_cigar = 0; // let the batch write its own libc cigar
+			mb_gpu_accum_add((mb_gpu_accum_t*)gpu, qlen, qseq, tlen, tseq, w, end_bonus, zdrop * opt->a, ksw_flag, ez);
+			// Synchronous dispatch keeps mb_align1's control flow intact: the
+			// caller inspects ez (z-drop test, dp_score, second pass) right
+			// after this returns, exactly as with the CPU path.
+			mb_gpu_accum_flush((mb_gpu_accum_t*)gpu);
+			// The batch returns ez->cigar as a libc malloc. The rest of the
+			// pipeline assumes ez->cigar lives in the km arena (it is freed with
+			// kfree(km, ez->cigar) and grown in place across pairs). Copy the
+			// GPU result into the reusable km buffer and release the libc one so
+			// ownership matches the CPU path exactly.
+			{
+				uint32_t *gpu_cigar = ez->cigar;
+				int gpu_n = ez->n_cigar, ci;
+				ez->cigar = km_cigar, ez->m_cigar = km_m_cigar, ez->n_cigar = 0;
+				for (ci = 0; ci < gpu_n; ++ci)
+					ez->cigar = ksw_push_cigar(km, &ez->n_cigar, &ez->m_cigar, ez->cigar, gpu_cigar[ci] & 0xf, gpu_cigar[ci] >> 4);
+				if (gpu_cigar) free(gpu_cigar);
+			}
+		} else {
+			ksw_extd2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, opt->q2, opt->e2, w, zdrop * opt->a, end_bonus, ksw_flag, ez);
+		}
+#else
+		(void)gpu;
 		ksw_extd2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, opt->q2, opt->e2, w, zdrop * opt->a, end_bonus, ksw_flag, ez);
+#endif
 		//fprintf(stderr, "D2\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", tlen, qlen, !!(ksw_flag&KSW_EZ_EXTZ_ONLY), ez->max_t, ez->max_q, ez->max, ez->zdropped);
 	}
 	if (kom_dbg_flag & MB_DBG_ALN_SEQ) {
@@ -545,7 +586,7 @@ static void mb_max_stretch(const mb_hit_t *r, const mb_anchor_t *a, int32_t *as,
 	*as = max_i, *cnt = max_len;
 }
 
-static void mb_align1(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, uint8_t *qseq0[2], l2b_meth_t mt, mb_hit_t *r, mb_hit_t *r2, int n_a, mb_anchor_t *a, ksw_extz_t *ez)
+static void mb_align1(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, uint8_t *qseq0[2], l2b_meth_t mt, mb_hit_t *r, mb_hit_t *r2, int n_a, mb_anchor_t *a, ksw_extz_t *ez, void *gpu)
 {
 	int32_t is_sr, max_back, rev = a[r->as].sid&1, as1, cnt1;
 	uint8_t *tseq = 0, *qseq;
@@ -642,7 +683,7 @@ static void mb_align1(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qle
 		l2b_getseq(mi->l2b, tid, ts0, ts, tseq);
 		mb_seq_rev(qs - qs0, qseq);
 		mb_seq_rev(ts - ts0, tseq);
-		mb_align_pair(km, opt, qs - qs0, qseq, ts - ts0, tseq, mat, bw, opt->end_bonus, r->split_inv? opt->zdrop_inv : opt->zdrop, ksw_flag|KSW_EZ_EXTZ_ONLY|KSW_EZ_RIGHT|KSW_EZ_REV_CIGAR, ez);
+		mb_align_pair(km, opt, qs - qs0, qseq, ts - ts0, tseq, mat, bw, opt->end_bonus, r->split_inv? opt->zdrop_inv : opt->zdrop, ksw_flag|KSW_EZ_EXTZ_ONLY|KSW_EZ_RIGHT|KSW_EZ_REV_CIGAR, ez, gpu);
 		if (ez->n_cigar > 0) {
 			mb_append_cigar(r, ez->n_cigar, ez->cigar);
 			r->p->dp_score += ez->reach_end? ez->mqe : ez->max;
@@ -687,10 +728,10 @@ static void mb_align1(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qle
 			// perform alignment
 			qseq = &qseq0[rev][qs];
 			l2b_getseq(mi->l2b, tid, ts, te, tseq);
-			mb_align_pair(km, opt, qe - qs, qseq, te - ts, tseq, mat, bw1, -1, opt->zdrop, ksw_flag|KSW_EZ_APPROX_MAX, ez); // first pass: with approximate Z-drop
+			mb_align_pair(km, opt, qe - qs, qseq, te - ts, tseq, mat, bw1, -1, opt->zdrop, ksw_flag|KSW_EZ_APPROX_MAX, ez, gpu); // first pass: with approximate Z-drop
 			// test Z-drop and inversion Z-drop
 			if ((zdrop_code = mm_test_zdrop(km, opt, qseq, tseq, ez->n_cigar, ez->cigar, mat, is_sr)) != 0)
-				mb_align_pair(km, opt, qe - qs, qseq, te - ts, tseq, mat, bw1, -1, zdrop_code == 2? opt->zdrop_inv : opt->zdrop, ksw_flag, ez); // second pass: lift approximate
+				mb_align_pair(km, opt, qe - qs, qseq, te - ts, tseq, mat, bw1, -1, zdrop_code == 2? opt->zdrop_inv : opt->zdrop, ksw_flag, ez, gpu); // second pass: lift approximate
 			if (kom_dbg_flag & MB_DBG_AN_POS) fprintf(stderr, "AD\t%d\t%ld\t%ld\t%d\t%d\t%d\t%d\n", r->as, (long)ts, (long)te, qs, qe, zdrop_code, ez->zdropped);
 			// update CIGAR
 			if (ez->n_cigar > 0)
@@ -732,7 +773,7 @@ static void mb_align1(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qle
 	if (!dropped && qe < qe0 && te < te0) { // right extension
 		qseq = &qseq0[rev][qe];
 		l2b_getseq(mi->l2b, tid, te, te0, tseq);
-		mb_align_pair(km, opt, qe0 - qe, qseq, te0 - te, tseq, mat, bw, opt->end_bonus, opt->zdrop, ksw_flag|KSW_EZ_EXTZ_ONLY, ez);
+		mb_align_pair(km, opt, qe0 - qe, qseq, te0 - te, tseq, mat, bw, opt->end_bonus, opt->zdrop, ksw_flag|KSW_EZ_EXTZ_ONLY, ez, gpu);
 		if (ez->n_cigar > 0) {
 			mb_append_cigar(r, ez->n_cigar, ez->cigar);
 			r->p->dp_score += ez->reach_end? ez->mqe : ez->max;
@@ -756,7 +797,7 @@ static void mb_align1(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qle
 	kfree(km, tseq);
 }
 
-static int mb_align1_inv(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, uint8_t *qseq0[2], l2b_meth_t mt, const mb_hit_t *r1, const mb_hit_t *r2, mb_hit_t *r_inv, ksw_extz_t *ez)
+static int mb_align1_inv(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, uint8_t *qseq0[2], l2b_meth_t mt, const mb_hit_t *r1, const mb_hit_t *r2, mb_hit_t *r_inv, ksw_extz_t *ez, void *gpu)
 { // NB: this doesn't work with the qstrand mode
 	int tl, ql, score, ret = 0, q_off, t_off;
 	uint8_t *tseq, *qseq;
@@ -789,7 +830,7 @@ static int mb_align1_inv(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int 
 	mb_seq_rev(tl, tseq);
 	if (score < opt->min_dp_max * opt->a) goto end_align1_inv;
 	q_off = ql - (q_off + 1), t_off = tl - (t_off + 1);
-	mb_align_pair(km, opt, ql - q_off, qseq + q_off, tl - t_off, tseq + t_off, mat, (int)(opt->bw * 1.5), -1, opt->zdrop, KSW_EZ_EXTZ_ONLY, ez);
+	mb_align_pair(km, opt, ql - q_off, qseq + q_off, tl - t_off, tseq + t_off, mat, (int)(opt->bw * 1.5), -1, opt->zdrop, KSW_EZ_EXTZ_ONLY, ez, gpu);
 	if (ez->n_cigar == 0) goto end_align1_inv; // should never be here
 	mb_append_cigar(r_inv, ez->n_cigar, ez->cigar);
 	r_inv->p->dp_score = ez->max;
@@ -846,7 +887,7 @@ static double mb_event_identity(const mb_hit_t *r)
 	return (double)r->mlen / (r->blen + r->p->n_ambi - n_gap + n_gapo);
 }
 
-static int32_t mb_recal_max_dp(const mb_hit_t *r, double b2, int32_t match_sc, int32_t qlen)
+static int32_t mb_recal_max_dp(const mb_hit_t *r, double b2, int32_t match_sc)
 {
 	uint32_t i;
 	int32_t n_gap = 0, n_mis;
@@ -860,7 +901,6 @@ static int32_t mb_recal_max_dp(const mb_hit_t *r, double b2, int32_t match_sc, i
 		}
 	}
 	n_mis = r->blen + r->p->n_ambi - r->mlen - n_gap;
-	n_mis += (int32_t)((qlen - (r->qe - r->qs)) / b2 + .499);
 	return (int32_t)(match_sc * (r->mlen - b2 * n_mis - gap_cost) + .499);
 }
 
@@ -882,16 +922,15 @@ void mb_update_dp_max(int qlen, int n_regs, mb_hit_t *regs, double frac, int a, 
 	if (div < 0.02) div = 0.02;
 	b2 = 0.5 / div; // max value: 25
 	if (b2 * a < b) b2 = (double)a / b;
-	for (i = 0, max = -1, max_i = -1; i < n_regs; ++i) {
+	for (i = 0; i < n_regs; ++i) {
 		mb_hit_t *r = &regs[i];
 		if (r->p == 0) continue;
-		r->p->dp_max = mb_recal_max_dp(r, b2, a, qlen);
+		r->p->dp_max = mb_recal_max_dp(r, b2, a);
 		if (r->p->dp_max < 0) r->p->dp_max = 0;
-		if (max < r->p->dp_max) max = r->p->dp_max, max_i = i;
 	}
 }
 
-mb_hit_t *mb_align_skeleton(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, const uint8_t *qseq, l2b_meth_t mt, int *n_regs_, mb_hit_t *regs, mb_anchor_t *a)
+mb_hit_t *mb_align_skeleton(void *km, const mb_opt_t *opt, const mb_idx_t *mi, int qlen, const uint8_t *qseq, l2b_meth_t mt, int *n_regs_, mb_hit_t *regs, mb_anchor_t *a, void *gpu)
 {
 	int32_t i, n_regs = *n_regs_, n_a;
 	uint8_t *qseq0[2];
@@ -908,10 +947,10 @@ mb_hit_t *mb_align_skeleton(void *km, const mb_opt_t *opt, const mb_idx_t *mi, i
 	memset(&ez, 0, sizeof(ksw_extz_t));
 	for (i = 0; i < n_regs; ++i) {
 		mb_hit_t r2; // only used for inversion
-		mb_align1(km, opt, mi, qlen, qseq0, mt, &regs[i], &r2, n_a, a, &ez);
+		mb_align1(km, opt, mi, qlen, qseq0, mt, &regs[i], &r2, n_a, a, &ez, gpu);
 		if (r2.cnt > 0) regs = mb_insert_reg(&r2, i, &n_regs, regs);
 		if (i > 0 && regs[i].split_inv) {
-			if (mb_align1_inv(km, opt, mi, qlen, qseq0, mt, &regs[i-1], &regs[i], &r2, &ez)) {
+			if (mb_align1_inv(km, opt, mi, qlen, qseq0, mt, &regs[i-1], &regs[i], &r2, &ez, gpu)) {
 				regs = mb_insert_reg(&r2, i, &n_regs, regs);
 				++i; // skip the inserted INV alignment
 			}

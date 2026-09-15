@@ -1,3 +1,4 @@
+// Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
@@ -5,6 +6,9 @@
 #include "kalloc.h"
 #include "kommon.h"
 #include "ksort.h"
+#ifdef HAVE_GPU_ALIGNMENT
+#include "gpu/include/gpu_dispatch.h"
+#endif
 
 #define key_128x(a) ((a).x)
 KRADIX_SORT_INIT(mb128x, mb128_t, key_128x, 8)
@@ -41,31 +45,6 @@ end_idx_load:
 	return idx;
 }
 
-mb_idx_t *mb_idx_load_mmap(const char *prefix, int32_t is_meth, int preload)
-{
-	char *buf;
-	mb_idx_t *idx = 0;
-	l2b_t *l2b;
-	mb_bwt_t *bwt;
-	buf = kom_calloc(char, strlen(prefix) + 10);
-	strcat(strcpy(buf, prefix), ".l2b");
-	l2b = l2b_load_mmap(buf, preload);
-	if (l2b == 0) goto end_idx_load_mmap;
-	if (is_meth) strcat(strcpy(buf, prefix), ".meth.mbw");
-	else strcat(strcpy(buf, prefix), ".mbw");
-	bwt = mb_bwt_load_mmap(buf, preload);
-	if (bwt == 0) {
-		l2b_destroy(l2b);
-		goto end_idx_load_mmap;
-	}
-	mb_bwt_cache(bwt, 10); // TODO: don't hard code this
-	idx = kom_calloc(mb_idx_t, 1);
-	idx->is_meth = !!is_meth, idx->l2b = l2b, idx->bwt = bwt;
-end_idx_load_mmap:
-	free(buf);
-	return idx;
-}
-
 void mb_idx_destroy(mb_idx_t *idx)
 {
 	if (idx == 0) return;
@@ -90,6 +69,10 @@ int64_t mb_idx_ctg_len(const mb_idx_t *idx, int32_t tid)
 
 struct mb_tbuf_s {
 	void *km;
+#ifdef HAVE_GPU_ALIGNMENT
+	mb_gpu_accum_t *gpu; // per-thread GPU alignment accumulator (lazily created)
+	int gpu_tried;       // avoid re-attempting creation after a failure
+#endif
 };
 
 mb_tbuf_t *mb_tbuf_init(int no_kalloc)
@@ -105,9 +88,31 @@ void *mb_tbuf_km(mb_tbuf_t *b)
 	return b->km;
 }
 
+void *mb_tbuf_gpu(mb_tbuf_t *b, const mb_opt_t *opt)
+{
+#ifdef HAVE_GPU_ALIGNMENT
+	if (!(opt->flag & MB_F_GPU)) return 0;
+	if (b->gpu == 0 && !b->gpu_tried) {
+		b->gpu_tried = 1;
+		b->gpu = mb_gpu_accum_init(opt->a, opt->b, opt->b_ts, opt->b_ambi,
+								   opt->q, opt->e, opt->q2, opt->e2,
+								   opt->bw, opt->zdrop, 4096);
+		if (b->gpu == 0)
+			fprintf(stderr, "[minibwa][warn] GPU alignment accumulator init failed; this thread falls back to CPU\n");
+	}
+	return b->gpu;
+#else
+	(void)b; (void)opt;
+	return 0;
+#endif
+}
+
 void mb_tbuf_destroy(mb_tbuf_t *b)
 {
 	if (b->km) km_destroy(b->km);
+#ifdef HAVE_GPU_ALIGNMENT
+	if (b->gpu) mb_gpu_accum_destroy(b->gpu);
+#endif
 	free(b);
 }
 
@@ -363,10 +368,10 @@ add_primary:
 	kfree(km, w);
 }
 
-int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
+void mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
 {
-	int32_t i, new_pri, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
-	if (n <= 0) return -1;
+	int32_t i, n_pri = 0, min_i = -1, min_qs = -1, first_i = -1;
+	if (n <= 0) return;
 	for (i = 0; i < n; ++i) {
 		r[i].sam_pri = 0;
 		if (r[i].id != r[i].parent) continue;
@@ -375,9 +380,8 @@ int32_t mb_set_sam_pri(int32_t n, mb_hit_t *r, int32_t is_primary5)
 			min_i = i, min_qs = r[i].qs;
 	}
 	assert(n_pri > 0);
-	new_pri = is_primary5? min_i : first_i;
-	r[new_pri].sam_pri = 1;
-	return new_pri;
+	if (is_primary5) r[min_i].sam_pri = 1;
+	else r[first_i].sam_pri = 1;
 }
 
 void mb_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int *n_, mb_hit_t *r)
@@ -644,7 +648,7 @@ mb_hit_t *mb_map_sai(const mb_opt_t *opt, const mb_idx_t *idx, int64_t qlen, con
 
 	// base alignment
 	if (!(opt->flag & MB_F_NO_ALN)) {
-		hit = mb_align_skeleton(b->km, opt, idx, qlen, seq, mt, &n_hit, hit, a);
+		hit = mb_align_skeleton(b->km, opt, idx, qlen, seq, mt, &n_hit, hit, a, mb_tbuf_gpu(b, opt));
 		mb_set_parent(b->km, opt->mask_level, opt->mask_len, n_hit, hit, sub_diff, 0);
 		mb_select_sub(b->km, opt->pri_ratio, opt->min_len * 2, opt->best_n, &n_hit, hit);
 		mb_set_sam_pri(n_hit, hit, !!(opt->flag & MB_F_PRIMARY5));
@@ -676,15 +680,11 @@ mb_hit_t *mb_map(const mb_opt_t *opt, const mb_idx_t *idx, int32_t qlen, const c
 	uint8_t *seq;
 	int32_t i;
 	l2b_meth_t mt = mt0 == 0? L2B_METH_NONE : mt0 == 1? L2B_METH_C2T : L2B_METH_G2A;
-	if (mt != L2B_METH_NONE && !idx->is_meth) { *n_hit_ = 0; return 0; }
 	b = b0? b0 : mb_tbuf_init(1);
 	mb_opt_adap(opt, qlen, &opt_adap);
-	if (mt != L2B_METH_NONE) opt_adap.flag |= MB_F_METH; // needed in mb_map_sai()
 	seq = Kmalloc(b->km, uint8_t, qlen);
 	for (i = 0; i < qlen; ++i)
 		seq[i] = kom_nt4_table[(uint8_t)seq0[i]];
-	if (mt != L2B_METH_NONE)
-		l2b_meth_convert(mt, qlen, seq);
 	mb_seed_intv(b->km, idx->bwt, qlen, seq, opt->min_len, opt->max_sub_occ, &u);
 	kfree(b->km, seq);
 	ret = mb_map_sai(&opt_adap, idx, qlen, seq0, mt, &u, n_hit_, b, qname);
@@ -699,10 +699,9 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 	mb_sai_v *sai;
 	uint8_t **seq4;
 	void *km;
-	int32_t i, j, k, sb_st, sb_len, sb_max, is_pe = !!(opt->flag & MB_F_PE), is_meth = !!(opt->flag & MB_F_METH);
+	int32_t i, j, k, sb_st, sb_len, sb_max, is_pe = !!(opt->flag & MB_F_PE);
 
 	if (n_seq <= 0) return 0;
-	if (is_meth && !idx->is_meth) return 0;
 	b = b0? b0 : mb_tbuf_init(0);
 	km = mb_tbuf_km(b);
 	hit = (mb_hit_t**)calloc(n_seq, sizeof(mb_hit_t*));
@@ -721,11 +720,9 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 			// convert sub-batch to 4-bit encoding
 			for (k = 0; k < sb_n; ++k) {
 				int32_t idx_k = sb_st + k;
-				l2b_meth_t mt = !is_meth? L2B_METH_NONE : !is_pe || (idx_k&1) == 0? L2B_METH_C2T : L2B_METH_G2A;
 				seq4[k] = Kmalloc(km, uint8_t, qlen[idx_k]);
 				for (j = 0; j < qlen[idx_k]; ++j)
 					seq4[k][j] = kom_nt4_table[(uint8_t)seq[idx_k][j]];
-				if (mt != L2B_METH_NONE) l2b_meth_convert(mt, qlen[idx_k], seq4[k]);
 			}
 
 			// batch SMEM for sub-batch
@@ -737,8 +734,12 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 			for (k = 0; k < sb_n; ++k) {
 				int32_t idx_k = sb_st + k;
 				mb_opt_t opt_adap;
-				l2b_meth_t mt = !is_meth? L2B_METH_NONE : !is_pe || (idx_k&1) == 0? L2B_METH_C2T : L2B_METH_G2A;
+				l2b_meth_t mt = L2B_METH_NONE;
 				mb_opt_adap(opt, qlen[idx_k], &opt_adap);
+				if (opt->flag & MB_F_METH) {
+					if (is_pe) mt = (idx_k&1) == 0? L2B_METH_C2T : L2B_METH_G2A;
+					else mt = L2B_METH_C2T;
+				}
 				hit[idx_k] = mb_map_sai(&opt_adap, idx, qlen[idx_k], seq[idx_k], mt, &sai[k], &n_hit[idx_k], b, qname? qname[idx_k] : 0);
 			}
 
@@ -752,7 +753,7 @@ mb_hit_t **mb_map_batch(const mb_opt_t *opt, const mb_idx_t *idx, int32_t n_seq,
 	kfree(km, seq4);
 
 	// paired-end processing
-	if (is_pe && n_seq >= 2 && !(opt->flag & (MB_F_NO_PAIRING|MB_F_NO_ALN))) {
+	if (is_pe && n_seq >= 2) {
 		mb_pestat_t pes[4];
 		for (i = 0; i < 4; ++i) pes[i].failed = 1;
 		pes[1].failed = 0;

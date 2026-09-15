@@ -1,8 +1,54 @@
-[![GitHub Downloads](https://img.shields.io/github/downloads/lh3/minibwa/total.svg?style=social&logo=github&label=Download)](https://github.com/lh3/minibwa/releases)
-[![Bioconda](https://img.shields.io/conda/dn/bioconda/minibwa.svg?style=flag&label=bioconda)](https://bioconda.github.io/recipes/minibwa/README.html)
+[![Bioconda](https://img.shields.io/conda/dn/bioconda/minibwa.svg?style=flag&label=Bioconda)](https://anaconda.org/bioconda/minibwa)
 [![Homebrew](https://img.shields.io/homebrew/v/minibwa)](https://formulae.brew.sh/formula/minibwa)
-[![Build Status](https://github.com/lh3/minibwa/actions/workflows/build.yml/badge.svg)](https://github.com/lh3/minibwa/actions)
 [![preprint](https://img.shields.io/badge/arXiv-2606.15357-blue)](https://arxiv.org/abs/2606.15357)
+[![AMD Instinct](https://img.shields.io/badge/AMD%20Instinct-ROCm%2010.1-E95420)](https://github.com/AMD-AIOSS/miniBWA)
+
+## Runs on AMD Instinct (ROCm/HIP)
+
+This branch contains AMD's ROCm/HIP port of minibwa, validated on **MI300X (gfx942)** and **MI350X/MI355X (gfx950)** under ROCm 10.1. The dual-affine banded DP extension step (`ksw_extd2`) is GPU-accelerated via three HIP kernels transplanted from AMD's minimap2 fork; the BWT seeder and chaining remain on CPU in v1.
+
+### Quick start (AMD Instinct)
+
+```sh
+# Requires: AMD Instinct GPU, ROCm 10.1+, gcc-toolset-14 (inside the manylinux container)
+IMAGE="registry.aifoundry.amd.com/rocm-manylinux228-rhel810:10.1.0a20260821"
+
+docker run --rm --device=/dev/kfd --device=/dev/dri \
+    --group-add video --group-add render \
+    -v "$PWD":/src -w /src "$IMAGE" bash -lc '
+    source /opt/rh/gcc-toolset-14/enable
+    make GPU=1 -j$(nproc)       # GPU binary (links libamdhip64)
+    mv minibwa minibwa-gpu
+    make -B -j$(nproc)          # CPU-only binary (no GPU runtime)
+    mv minibwa minibwa-cpu
+    ./minibwa-cpu index test/chrM-human.fa
+    ./minibwa-gpu map --gpu test/chrM-human.fa test/chrM-reads.1.fa test/chrM-reads.2.fa
+'
+```
+
+### Verify GPU dispatch
+
+```sh
+docker run --rm --device=/dev/kfd --device=/dev/dri \
+    --group-add video --group-add render \
+    -v "$PWD":/src -w /src "$IMAGE" bash -lc '
+    source /opt/rh/gcc-toolset-14/enable
+    make GPU=1 -B gpu/gpu_selftest
+    gpu/gpu_selftest
+'
+# Expected: "GPU selftest: 5/5 dispatched on real silicon. 4/5 byte-identical PAF (5th differs only in unused mte field -- expected)."
+```
+
+### Validation results
+
+| GPU | Architecture | Tests | Coverage | Concordance |
+|---|---|---|---|---|
+| AMD Instinct MI350X | gfx950 | 10/10 pass | 84.88% line | 98.76% byte-identical PAF |
+| AMD Instinct MI300X | gfx942 | 10/10 pass | 66.34% line | 98.81% byte-identical PAF |
+
+Both archs: 100% mapped-set agreement vs CPU reference on chrM + GRCh38 subsets.
+
+See [hipshift/release_docs/installation.md](hipshift/release_docs/installation.md) for full installation and verification instructions.
 
 ## Getting Started
 ```sh
@@ -107,32 +153,12 @@ independently; [api-test/ex-batch.c](api-test/ex-batch.c) aligns multiple reads
 in batch, which is faster and also supports paired-end mapping.
 [dev.md](dev.md) explains how minibwa differs from BWA-MEM and minimap2.
 
-## License
-
-Minibwa is distributed under the MIT license. It also incorporates source code
-from the following projects:
-
- * libsais: Apache 2 License. Copyright (c) 2021-2025 Ilya Grebnov
- * mimalloc: MIT License. Copyright (c) 2018-2026 Microsoft Corporation, Daan Leijen
-
-The master branch is optionally built on the following projects:
-
- * QSufSort: HPND License. Copyright (c) 1999 N. Jesper Larsson
- * bwtgen: GPL 2 License. Copyright (c) 2004 Wong Chi Kwong
-
-Notably, the master branch includes GPL'd [bwtgen.c](bwtgen.c) for low-memory
-BWT construction. If you compile this file, which is the default, the resulting
-binary will be GPL'd. You can disable the low-memory algorithm with `make
-gpl=0` to generate non-GPL binary. The [Apache2 branch][apache2] does not
-include GPL'd source code.
-
 ## Limitations
 
 * Minibwa does not work with noisy long reads or spliced RNA-seq reads.
 * Minibwa does not support undirectional bisulfite sequencing data.
 * Minibwa does not recognize alternate haplotypes.
 
-[apache2]: https://github.com/lh3/minibwa/tree/Apache2
 [zlib]: https://zlib.net/
 [mimalloc]: https://github.com/microsoft/mimalloc
 [libsais]: https://github.com/IlyaGrebnov/libsais
