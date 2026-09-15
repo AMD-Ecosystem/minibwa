@@ -1,0 +1,398 @@
+.TH minibwa 1 "28 June 2026" "minibwa-0.3 (r391)" "Bioinformatics tools"
+.SH NAME
+.PP
+minibwa - short/long-read alignment against a reference genome
+.SH SYNOPSIS
+* Indexing a genome with the libsais algorithm (OpenMP required for multi-threading):
+.RS 4
+minibwa index
+.RB [ -t
+.IR nThreads ]
+.I ref.fa
+.RI [ idxPrefix ]
+.RE
+
+* Indexing a genome in low memory with the BWT-SW algorithm:
+.RS 4
+minibwa index
+.B -l
+.I ref.fa
+.RI [ idxPrefix ]
+.RE
+
+* Aligning short paired-end reads to an indexed genome and outputting SAM:
+.RS 4
+minibwa map
+.RB [ -t
+.IR nThreads ]
+.I idxPrefix
+.I read1.fq.gz
+.I read2.fq.gz
+>
+.I output.sam
+.RE
+
+* Indexing and aligning bisulfite sequencing reads:
+.RS 4
+minibwa index
+.B --meth
+.RB [ -t
+.IR nThreads ]
+.I ref.fa
+.RI [ idxPrefix ]
+.br
+minibwa map
+.B --meth
+.RB [ -t
+.IR nThreads ]
+.I idxPrefix
+.I read1.fq.gz
+.I read2.fq.gz
+>
+.I output.sam
+.RE
+
+.SH DESCRIPTION
+Minibwa aligns short reads against a reference genome. It is the successor of
+bwa-mem with a different algorithm. Minibwa is over three times as fast as the
+original bwa-mem and twice as fast as bwa-mem2 at comparable accuracy. While
+minibwa works with accurate long reads, minimap2 is more robust under high
+error rate.
+
+Minibwa is a hybrid of bwa-mem and minimap2: it indexes the genome with
+Burrow-Wheeler Transform (BWT), finds variable-length seeds like bwa-mem, and
+performs chaining and SIMD-based nucleotide alignment with the minimap2
+algorithm. Minibwa speeds up bwa-mem2 further with additional prefetch for
+seeding, new heuristics to skip unnecessary mate rescue and reduced effort in
+highly repetitive regions where reads would often be wrongly mapped due to
+structural changes anyway.
+
+.SH THE INDEX COMMAND
+.SS Summary
+.B minibwa index
+.RB [ -l ]
+.RB [ -t
+.IR nThreads ]
+.RB [ --meth ]
+.I ref.fa
+.RI [ idxPrefix ]
+
+Index a genome in the FASTA format. Generate
+.IR idxPrefix .l2b
+for the genome sequence and
+.IR idxPrefix .mbw
+for the FM-index. Minibwa uses the libsais algorithm for BWT construction by
+default. This algorithm is fast but requires
+.RI 18 N
+bytes where
+.I N
+is the length of the genome. Use
+.B -l
+to enable the BWT-SW algorithm which is slower but uses much less memory.
+
+.SS Options
+.TP 10
+.B -l
+Use the old low-memory algorithm for BWT construction. Minibwa uses the libsais
+algorithm by default which uses over 50 GB for a human genome.
+.TP
+.BI -t \ INT
+Number of threads for the libsais algorithm [1]. Minibwa needs to be compiled
+with OpenMP to enable this option.
+.TP
+.B --meth
+Generate an index for aligning bisulfite sequencing reads. Minibwa will
+additionally generate
+.IR idxPrefix .meth.mbw
+which combines C-to-T and G-to-A converted reference genomes.
+
+.SH THE MAP COMMAND
+.SS Summary
+.B minibwa map
+.RB [ -x
+.IR preset ]
+.RB [ -t
+.IR nThreads ]
+.I idxPrefix
+.I read.fq.gz
+.RI [ read2.fq.gz ]
+
+Map reads to an index genome. Minibwa automatically detects
+interleaved read pairs and like bwa-mem and minimap2, allowing mixed single-end
+and paired-ened reads as input.
+
+.SS Common Options
+.TP 10
+.B -f
+Output alignment in the PAF format (SAM by default)
+.TP
+.BI -t \ INT
+Number of worker CPU threads [1]. Minibwa additionally uses
+.RI min(2, \fIINT )
+threads for I/O.
+.TP
+.BI -l \ NUM
+In the adaptive mode, treat reads shorter than
+.I NUM
+as short reads [325]
+.TP
+.BI -R \ STR
+SAM read group line in a format like '@RG\\tID:foo\\tSM:bar' []
+.TP
+.BI -b \ STR
+Output a base alignment tag:
+.BR cs,
+.B ds
+or
+.B MD
+[]. Only one tag is allowed.
+.TP
+.B --hic
+Map Hi-C reads. Equivalent to option
+.BR -5P .
+.TP
+.B --meth
+Map
+.B directional
+bisulfite sequencing (BS-seq) data. Require an index built with
+.BR --meth .
+In this mode, an unmethylated C on read 1 is expected to be converted to T and
+an unmethylated G on read 2 converted to A. Minibwa does not support
+undirectional BS-seq.
+
+.SS Mapping Options
+.TP 10
+.BI -k \ INT
+Minimum seed length [19]. Like bwa-mem, minibwa uses variable-length seeds.
+.TP
+.BI -c \ NUM
+Maximum seed occurrence [250]. Minibwa samples up to
+.I NUM
+occurrences if there are too many.
+.TP
+.BI -g \ NUM
+Stop chain enlongation if there are no minimizers within
+.BR NUM -bp
+[5000]. Also used for extending from the first and last anchors during base
+alignment.
+.TP
+.BI -w \ NUM
+Bandwidth for initial chaining and base alignment [500].
+.TP
+.BI -W \ NUM
+Bandwidth for secondary chaining through long gaps [20000].
+.TP
+.BI -m \ INT
+Minimum chaining score [25]
+.TP
+.BI -p \ FLOAT
+Minimum secondary-to-primary score ratio [0.5]
+.TP
+.BI -N \ INT
+Retain at most
+.I INT
+secondary alignments [101]
+.TP
+.B --chain-only
+Perform chaining only without base alignment
+.TP
+.BR --long = yes | no
+Whether to use the long-read heuristic for all reads
+.TP
+.BR --adap = yes | no
+Whether to enable the adaptive mode, which is the default behavior with the
+.B adap
+preset. In the adaptive mode, minibwa smoothly adjusts
+.BR -g / -w / -W / -N / -m / -s
+based on the individual read length, using formula
+.IR x1 -( x1 - x0 )*pow(2,-(max( L ,100)-100)/(2000-100)),
+where
+.I L
+is the read length,
+.I x1
+is the value for long reads that are fixed, and
+.I x0
+is the value for short reads that can be changed on the command line. For a
+read longer than
+.BR -l ,
+minibwa additionally enables anchor filtering and mixes the short- and
+long-read formulae for calculating the mapping quality.
+.TP
+.BI -x \ STR
+Preset:
+.BR sr ,
+.B lr
+or
+.B adap
+.RB [ adap ].
+If unsure, use the default
+.B adap
+which works well for both short and long reads.
+.RS
+.TP 6
+.B sr
+For short-read alignment. It may give fragmented alignment for typical long reads.
+.TP
+.B lr
+For long-read alignment
+.RB ( --pe=no
+.B --long -m40 -s50 -w500 -g5k -N5
+.BR -K500m ).
+It may miss highly repetitive alignments for typical short reads.
+.TP
+.B adap
+For mixed short and long reads but optimized for short reads. It is equivalent to
+.RB ' -xsr
+.BR --adap=yes '.
+.RE
+
+.SS Alignment Options
+.TP 10
+.BI -A \ INT
+Match score [2]
+.TP
+.BI -B \ INT
+Mismatch penalty [8]
+.TP
+.B -O \fIINT1\fR[,\fIINT2\fR]
+Dual gap open penalty [12,23]. If
+.I INT2
+is not specified, it is set to
+.IR INT1 .
+.TP
+.B -E \fIINT1\fR[,\fIINT2\fR]
+Dual gap extension penalty [2,1]. If
+.I INT2
+is not specified, it is set to
+.IR INT1 .
+A gap of length
+.I k
+costs
+.RI min( O1 + k * E1 , O2 + k * E2 ).
+
+.SS Paired-end Options
+.TP 10
+.B -P
+Skip read pairing and mate rescue
+.TP
+.BR --rescue = \fIINT
+Mate rescue for up to
+.I INT
+candidates [10]
+.TP
+.BR --pe = yes | no
+Whether to enable the paired-end mode. Enabled by default with the
+.B adap
+or
+.B sr
+presets. Disabled with the
+.B lr
+preset.
+
+.SS Input/Output Options
+.TP 10
+.BI -o \ FILE
+Output file name [stdout]
+.TP
+.B -u
+Don't output unmapped reads
+.TP
+.BR --outn = \fINUM
+Output up to
+.I INT
+secondary alignments [0]. Primary and supplementary alignments are always outputted.
+.TP
+.BR --xa = \fINUM
+If there are
+.RI >= NUM
+secondary hits of score above 80% of the best hit, output all of them to the XA tag [5]
+.TP
+.B -y
+Copy FASTA/Q comments to output
+.TP
+.B -Y
+In the SAM output, use soft clipping for supplementary alignments
+.TP
+.BI -H \ STR
+If
+.I STR
+starts with @, insert it to the SAM header; otherwise, treat
+.I STR
+as a file name and insert lines in this file to the SAM header []
+.TP
+.B -5
+In the SAM output, if a read has supplementary alignments, take the alignment
+with the smallest query (not genomic) position as primary. This mode, combined with
+.BR -P ,
+is commonly used for mapping Hi-C reads.
+.TP
+.B -K \fINUM1\fR[,\fINUM2\fR]
+Process
+.IR NUM1 - NUM2
+bp of query sequences in a batch [100m,1g]. Given enough reads in the input, a
+batch is at least
+.I NUM1
+in size. If there are less than 40000 sequences in the batch, continue to read
+until the size reaches
+.IR NUM2 .
+.TP
+.B --version
+Print version number
+
+.SH OUTPUT FORMATS
+.PP
+Minibwa outputs the SAM format by default. Options
+.B -f
+enables the PAF output. PAF is a TAB-delimited text format with each line
+consisting of at least 12 fields as are described in the following table:
+.TS
+center box;
+cb | cb | cb
+r | c | l .
+Col	Type	Description
+_
+1	string	Read name
+2	int	Read length
+3	int	Read start coordinate (0-based)
+4	int	Read end coordinate (0-based)
+5	char	`+' for forward strand; `-' for reverse
+6	string	Contig name
+7	int	Contig length
+8	int	Contig start coordinate on the original strand
+9	int	Contig end coordinate on the original strand
+10	int	Number of matching bases
+11	int	Number of bases in alignment
+12	int	Mapping quality (0-255 with 255 for missing)
+.TE
+
+.PP
+Both SAM and PAF may have addtional fields in typed
+key-value format. Minibwa may output the following tags:
+.TS
+center box;
+cb | cb | cb
+r | c | l .
+Tag	Type	Description
+_
+NM	i	Edit distance
+AS	i	Alignment score from dynamic programming
+ms	i	Score of the maximum scoring segment
+md	i	Max score minus secondary max score
+XA	Z	Secondary hits in (ctg,strandPos,CIGAR,NM;)+
+MC	Z	Mate CIGAR
+MQ	i	Mate mapping quality
+cg	Z	CIGAR (PAF only)
+MD	Z	Difference string in the SAM spec
+cs	Z	Difference string
+.TE
+
+.SH LIMITATIONS
+.TP 2
+*
+Minibwa does not work with noisy long reads or spliced RNA-seq reads.
+.TP
+*
+Minibwa does not support undirectional bisulfite sequencing data.
+.TP
+*
+Minibwa does not recognize alternate haplotypes.

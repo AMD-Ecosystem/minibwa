@@ -1,0 +1,10 @@
+.*.swp
+*.o
+*.a
+Makefile.bak
+minibwa
+minibwa-cpu
+minibwa-gpu
+gpu/gpu_selftest
+core
+tmp
